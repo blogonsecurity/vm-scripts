@@ -29,7 +29,7 @@ Write-Host "$('[{0:HH:mm}]' -f (Get-Date)) Downloading Sysmon.exe..."
 (New-Object System.Net.WebClient).DownloadFile('https://live.sysinternals.com/Sysmon.exe', $sysmonPath)
 
 
-# Download Sentinel ATT&CK Sysmon config
+# Download Sentinel ATT&CK Sysmon config 
 Write-Host "$('[{0:HH:mm}]' -f (Get-Date)) Downloading sentinel-ATT&CK Sysmon config..."
 (New-Object System.Net.WebClient).DownloadFile('https://raw.githubusercontent.com/BlueTeamToolkit/sentinel-attack/master/sysmonconfig.xml', "$sysmonConfigPath")
 
