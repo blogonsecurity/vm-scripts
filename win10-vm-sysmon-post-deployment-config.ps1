@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $sysinternalsDir = 'C:\Tools\Sysinternals'
 $sysmonDir = 'C:\ProgramData\Sysmon'
-$sysmonPath = Join-Path $sysinternalsDir 'Sysmon.exe'
+$standaloneSysmonPath = Join-Path $sysinternalsDir 'Sysmon.exe'
 $sysmonConfigPath = Join-Path $sysmonDir 'sysmonConfig.xml'
 $channelName = 'Microsoft-Windows-Sysmon/Operational'
 $serviceFilter = "Name = 'Sysmon' OR Name = 'Sysmon64'"
@@ -19,7 +19,23 @@ $stagedConfigPath = $null
 try {
     $services = @(Get-CimInstance -ClassName Win32_Service -Filter $serviceFilter)
     if ($services.Count -eq 0) {
-        New-Item -ItemType Directory -Path $sysinternalsDir, $sysmonDir -Force | Out-Null
+        $nativeFeature = Get-WindowsOptionalFeature -Online | Where-Object FeatureName -eq 'Sysmon'
+        if ($nativeFeature) {
+            if ($nativeFeature.State -in 'EnablePending', 'DisablePending') {
+                throw "Built-in Sysmon is in state '$($nativeFeature.State)'. Restart Windows and rerun the extension."
+            }
+
+            # Standalone Sysmon extracts its service binary to the Windows installation directory.
+            $standaloneRemnants = @('Sysmon.exe', 'Sysmon64.exe', 'Sysmon64a.exe' | ForEach-Object {
+                $path = Join-Path $env:SystemRoot $_
+                if (Test-Path -LiteralPath $path -PathType Leaf) { $path }
+            })
+            if ($standaloneRemnants.Count -gt 0) {
+                throw "Standalone Sysmon files remain at $($standaloneRemnants -join ', '). Complete the supported standalone uninstall before enabling built-in Sysmon."
+            }
+        }
+
+        New-Item -ItemType Directory -Path $sysmonDir -Force | Out-Null
         $stagedConfigPath = Join-Path $sysmonDir ([Guid]::NewGuid().ToString('N') + '.xml')
 
         Write-Host 'Downloading the pinned Sysmon configuration.'
@@ -35,11 +51,39 @@ try {
             throw 'The configuration XML must have a Sysmon root element.'
         }
 
-        Write-Host 'Downloading Sysmon from Microsoft Sysinternals.'
-        Invoke-WebRequest -Uri 'https://live.sysinternals.com/Sysmon.exe' -OutFile $sysmonPath -UseBasicParsing -TimeoutSec 60
+        $installerArguments = @('-i', ('"{0}"' -f $stagedConfigPath))
+        if ($nativeFeature) {
+            if ($nativeFeature.State -ne 'Enabled') {
+                Write-Host 'Enabling the built-in Windows Sysmon feature.'
+                $featureChange = Enable-WindowsOptionalFeature -Online -FeatureName Sysmon -NoRestart
+                if ($featureChange.RestartNeeded) {
+                    throw 'Built-in Sysmon requires a Windows restart to complete feature enablement. Restart Windows and rerun the extension.'
+                }
+                $nativeFeature = Get-WindowsOptionalFeature -Online -FeatureName Sysmon
+                if ($nativeFeature.State -ne 'Enabled') {
+                    throw "Built-in Sysmon feature state is '$($nativeFeature.State)' after enablement. Check Windows servicing status before rerunning."
+                }
+            }
 
-        Write-Host 'Installing Sysmon.'
-        $installerArguments = @('-accepteula', '-i', ('"{0}"' -f $stagedConfigPath))
+            $systemDirectory = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+                'Sysnative'
+            } else {
+                'System32'
+            }
+            $sysmonPath = Join-Path (Join-Path $env:SystemRoot $systemDirectory) 'Sysmon.exe'
+            if (-not (Test-Path -LiteralPath $sysmonPath -PathType Leaf)) {
+                throw "Built-in Sysmon is enabled, but its Windows executable is missing at $sysmonPath."
+            }
+            Write-Host 'Installing built-in Sysmon with the verified configuration.'
+        } else {
+            New-Item -ItemType Directory -Path $sysinternalsDir -Force | Out-Null
+            $sysmonPath = $standaloneSysmonPath
+            Write-Host 'Downloading standalone Sysmon from Microsoft Sysinternals.'
+            Invoke-WebRequest -Uri 'https://live.sysinternals.com/Sysmon.exe' -OutFile $sysmonPath -UseBasicParsing -TimeoutSec 60
+            $installerArguments = @('-accepteula') + $installerArguments
+            Write-Host 'Installing standalone Sysmon with the verified configuration.'
+        }
+
         $installer = Start-Process -FilePath $sysmonPath -ArgumentList $installerArguments -NoNewWindow -Wait -PassThru
         if ($installer.ExitCode -ne 0) {
             throw "Sysmon installer exited with code $($installer.ExitCode). Check its output for details."
